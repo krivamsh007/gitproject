@@ -1,0 +1,9 @@
+CREATE DATABASE metastore;
+CREATE USER hive WITH PASSWORD 'hive';
+ALTER DATABASE metastore OWNER TO hive;
+GRANT ALL PRIVILEGES ON DATABASE metastore TO hive;
+
+CREATE DATABASE superset;
+CREATE USER superset WITH PASSWORD 'superset';
+ALTER DATABASE superset OWNER TO superset;
+GRANT ALL PRIVILEGES ON DATABASE superset TO superset;

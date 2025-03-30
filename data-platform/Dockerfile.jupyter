@@ -1,0 +1,10 @@
+FROM jupyter/all-spark-notebook:spark-3.3.1
+
+USER ${NB_UID}
+RUN pip install --no-cache-dir \
+    great-expectations==0.15.50 \
+    sqlalchemy==2.0.25 \
+    delta-spark==2.3.0 \
+    jupyterlab-git==0.41.0
+
+EXPOSE 4040

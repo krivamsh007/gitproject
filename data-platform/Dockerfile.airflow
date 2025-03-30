@@ -1,0 +1,10 @@
+FROM apache/airflow:2.6.3
+
+USER airflow
+RUN pip install --user --no-cache-dir \
+    great-expectations==0.15.50 \
+    sqlalchemy==1.4.46 \
+    psycopg2-binary==2.9.6 \
+    delta-spark==2.3.0
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint"]

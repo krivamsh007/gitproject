@@ -1,0 +1,182 @@
+volumes:
+  delta_storage:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./delta_storage
+      o: bind
+  postgres_data:
+  superset_db:
+  hive_metastore_data:
+
+networks:
+  data-network:
+    driver: bridge
+
+services:
+  # DATABASE SERVICES
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - data-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # AIRFLOW SERVICES
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    command: >
+      bash -c "
+        until airflow db check; do
+          echo 'Waiting for database...';
+          sleep 5;
+        done;
+        airflow db init;
+        airflow db upgrade;
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com;
+        airflow webserver & 
+        airflow scheduler
+      "
+    volumes:
+      - delta_storage:/opt/airflow/delta_lake
+      - ./dags:/opt/airflow/dags
+    ports:
+      - "8080:8080"  # Airflow UI
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - data-network
+
+  # SPARK ENVIRONMENT
+  spark-master:
+    image: bitnami/spark:3.3.1
+    environment:
+      SPARK_MODE: master
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_LOCAL_IP: 0.0.0.0
+      SPARK_PACKAGES: "io.delta:delta-core_2.12:2.3.0,org.apache.hadoop:hadoop-aws:3.3.4"
+    ports:
+      - "18080:8080"  # Spark UI
+      - "7077:7077"   # Master port
+      - "6066:6066"   # REST server
+    volumes:
+      - delta_storage:/data
+    networks:
+      - data-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  spark-worker:
+    image: bitnami/spark:3.3.1
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 4g
+      SPARK_LOCAL_IP: 0.0.0.0
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    volumes:
+      - delta_storage:/data
+    networks:
+      - data-network
+
+  # DATA NOTEBOOK
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile.jupyter
+    environment:
+      JUPYTER_TOKEN: ""  # Empty token
+    command: >
+      bash -c "
+        jupyter lab --allow-root --ip=0.0.0.0 --NotebookApp.token='' --NotebookApp.password=''
+      "
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - delta_storage:/data
+    ports:
+      - "8888:8888"
+    networks:
+      - data-network
+  # KAFKA ECOSYSTEM
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    ports:
+      - "2181:2181"
+    networks:
+      - data-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+    ports:
+      - "9092:9092"
+    networks:
+      - data-network
+
+  # DATA VISUALIZATION
+  superset:
+    image: apache/superset:2.1.0
+    environment:
+      SUPERSET_SECRET_KEY: 'delta123'
+      SUPERSET_DATABASE_URI: postgresql+psycopg2://superset:superset@postgres/superset
+    volumes:
+      - superset_db:/app/superset_home
+    ports:
+      - "8088:8088"  # Superset UI
+    depends_on:
+      - postgres
+    networks:
+      - data-network
+
+  # DATA CATALOG
+  hive-metastore:
+    image: apache/hive:4.0.0-beta-1
+    environment:
+      DB_DRIVER: postgres
+    command: >
+      bash -c "
+        rm -f /opt/hive/lib/log4j-slf4j-impl-*.jar &&
+        mkdir -p /home/hive/.beeline &&
+        /opt/hive/bin/schematool -dbType postgres -initSchema -verbose &&
+        /opt/hive/bin/hive --service metastore
+      "
+    volumes:
+      - hive_metastore_data:/opt/hive/metastore
+      - ./conf/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./lib/postgresql-42.6.0.jar:/opt/hive/lib/postgresql-42.6.0.jar
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - data-network
